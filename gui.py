@@ -17,8 +17,8 @@ TEMPLATE  = os.path.join(BASE_DIR, "RICEVUTA_TEMPLATE.xlsm")
 VERSIONE_CORRENTE = "1.0.0"
 
 # !! CAMBIA QUESTO con il tuo username GitHub e nome repository !!
-GITHUB_USER = "gab91205"
-GITHUB_REPO = "Gestionale-Officina"
+GITHUB_USER = "TUO_USERNAME_GITHUB"
+GITHUB_REPO = "garage-tito-gestionale"
 # URL del file version.txt nella release più recente
 GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/main/version.txt"
 GITHUB_GUI_URL     = f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/main/gui.py"
@@ -33,24 +33,27 @@ except Exception as e:
     import tkinter as _tk
     _r = _tk.Tk(); _r.withdraw()
     _tk.messagebox.showerror("Errore DB",
-        f"Impossibile connettersi al database:\n{e}\n\n"
-        "Verifica che MySQL sia avviato e la password in db_connection.py sia corretta.")
+        f"Impossibile aprire il database:\n{e}")
     sys.exit(1)
 
 def db_fetch(sql, params=()):
+    """Esegue una SELECT e restituisce lista di dict."""
+    # Converte placeholder MySQL (%s) → SQLite (?)
+    sql = sql.replace("%s", "?")
     conn = get_connection()
     try:
-        cur = conn.cursor(dictionary=True)
-        cur.execute(sql, params)
-        return cur.fetchall()
+        cur = conn.execute(sql, params)
+        cols = [d[0] for d in cur.description] if cur.description else []
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
     finally:
         conn.close()
 
 def db_commit(sql, params=()):
+    """Esegue INSERT/UPDATE/DELETE e restituisce lastrowid."""
+    sql = sql.replace("%s", "?")
     conn = get_connection()
     try:
-        cur = conn.cursor()
-        cur.execute(sql, params)
+        cur = conn.execute(sql, params)
         conn.commit()
         return cur.lastrowid
     finally:
@@ -58,75 +61,92 @@ def db_commit(sql, params=()):
 
 def _auto_migra():
     """
-    Controlla e aggiunge automaticamente colonne/tabelle mancanti.
-    Viene eseguita silenziosamente all'avvio — nessun messaggio se tutto ok.
+    Crea tutte le tabelle se non esistono e aggiunge colonne mancanti.
+    Compatibile SQLite — usa PRAGMA invece di SHOW COLUMNS.
     """
     try:
         conn = get_connection()
-        cur  = conn.cursor()
 
-        colonne_da_aggiungere = [
-            ("clienti",         "tipo_cliente",    "ALTER TABLE clienti ADD COLUMN tipo_cliente VARCHAR(10) DEFAULT 'privato'"),
-            ("clienti",         "ragione_sociale", "ALTER TABLE clienti ADD COLUMN ragione_sociale VARCHAR(150)"),
-            ("veicoli",         "telaio",            "ALTER TABLE veicoli ADD COLUMN telaio VARCHAR(50)"),
-            ("fatture",         "file_path",         "ALTER TABLE fatture ADD COLUMN file_path VARCHAR(225)"),
-            ("fatture",         "id_veicolo",        "ALTER TABLE fatture ADD COLUMN id_veicolo INT"),
-            ("fatture",         "id_storico",        "ALTER TABLE fatture ADD COLUMN id_storico INT"),
-            ("fatture",         "numero_fattura",    "ALTER TABLE fatture ADD COLUMN numero_fattura VARCHAR(20)"),
-            ("magazzino_gomme", "montate",           "ALTER TABLE magazzino_gomme ADD COLUMN montate BOOLEAN DEFAULT FALSE"),
-            ("magazzino_gomme", "targa_veicolo",     "ALTER TABLE magazzino_gomme ADD COLUMN targa_veicolo VARCHAR(20)"),
-        ]
+        conn.executescript("""
+        CREATE TABLE IF NOT EXISTS clienti (
+            id_cliente      INTEGER PRIMARY KEY AUTOINCREMENT,
+            nome            TEXT,
+            cognome         TEXT NOT NULL DEFAULT '',
+            telefono        TEXT,
+            email           TEXT,
+            indirizzo       TEXT,
+            cap             TEXT,
+            data_creazione  TEXT,
+            tipo_cliente    TEXT DEFAULT 'privato',
+            ragione_sociale TEXT
+        );
+        CREATE TABLE IF NOT EXISTS veicoli (
+            id_veicolo  INTEGER PRIMARY KEY AUTOINCREMENT,
+            id_cliente  INTEGER REFERENCES clienti(id_cliente) ON DELETE CASCADE,
+            targa       TEXT,
+            marca       TEXT,
+            modello     TEXT,
+            anno        INTEGER,
+            chilometri  INTEGER DEFAULT 0,
+            telaio      TEXT,
+            carta_grigia_path TEXT
+        );
+        CREATE TABLE IF NOT EXISTS storico_interventi (
+            id_intervento INTEGER PRIMARY KEY AUTOINCREMENT,
+            id_veicolo    INTEGER NOT NULL REFERENCES veicoli(id_veicolo) ON DELETE CASCADE,
+            data_lavoro   TEXT NOT NULL,
+            descrizione   TEXT NOT NULL,
+            costo         REAL DEFAULT 0,
+            note          TEXT
+        );
+        CREATE TABLE IF NOT EXISTS fatture (
+            id_fattura      INTEGER PRIMARY KEY AUTOINCREMENT,
+            id_cliente      INTEGER REFERENCES clienti(id_cliente),
+            id_veicolo      INTEGER REFERENCES veicoli(id_veicolo),
+            data_fattura    TEXT,
+            totale          REAL,
+            pagata          INTEGER DEFAULT 0,
+            file_path       TEXT,
+            id_storico      INTEGER,
+            numero_fattura  TEXT,
+            iva_applicata   INTEGER DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS voci_fattura (
+            id_voce     INTEGER PRIMARY KEY AUTOINCREMENT,
+            id_fattura  INTEGER NOT NULL REFERENCES fatture(id_fattura) ON DELETE CASCADE,
+            descrizione TEXT,
+            quantita    REAL DEFAULT 1,
+            prezzo      REAL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS magazzino_gomme (
+            id_gomma        INTEGER PRIMARY KEY AUTOINCREMENT,
+            id_cliente      INTEGER REFERENCES clienti(id_cliente) ON DELETE SET NULL,
+            targa_veicolo   TEXT,
+            marca           TEXT NOT NULL,
+            modello         TEXT,
+            stagione        TEXT DEFAULT 'Estiva',
+            misura          TEXT,
+            quantita        INTEGER DEFAULT 1,
+            stato           TEXT DEFAULT 'Nuovo',
+            posizione       TEXT,
+            deposito_pagato INTEGER DEFAULT 0,
+            montate         INTEGER DEFAULT 0,
+            note            TEXT
+        );
+        CREATE TABLE IF NOT EXISTS numero_fattura_config (
+            id              INTEGER PRIMARY KEY DEFAULT 1,
+            prossimo_numero INTEGER
+        );
+        """)
 
-        for tabella, colonna, sql_alter in colonne_da_aggiungere:
-            # verifica che la tabella esista prima
-            cur.execute(f"SHOW TABLES LIKE '{tabella}'")
-            if not cur.fetchone():
-                continue
-            cur.execute(f"SHOW COLUMNS FROM {tabella} LIKE '{colonna}'")
-            if not cur.fetchone():
-                cur.execute(sql_alter)
-
-        # Crea tabelle mancanti se necessario
-        cur.execute("SHOW TABLES LIKE 'storico_interventi'")
-        if not cur.fetchone():
-            cur.execute("""CREATE TABLE storico_interventi (
-                id_intervento INT AUTO_INCREMENT PRIMARY KEY,
-                id_veicolo INT NOT NULL, data_lavoro DATE NOT NULL,
-                descrizione TEXT NOT NULL, costo DECIMAL(10,2) DEFAULT 0, note TEXT,
-                FOREIGN KEY (id_veicolo) REFERENCES veicoli(id_veicolo) ON DELETE CASCADE)""")
-
-        cur.execute("""CREATE TABLE IF NOT EXISTS numero_fattura_config
-            (id INT PRIMARY KEY DEFAULT 1, prossimo_numero INT NULL)""")
-        cur.execute("INSERT IGNORE INTO numero_fattura_config (id) VALUES (1)")
-
-        cur.execute("SHOW TABLES LIKE 'voci_fattura'")
-        if not cur.fetchone():
-            cur.execute("""CREATE TABLE voci_fattura (
-                id_voce INT AUTO_INCREMENT PRIMARY KEY, id_fattura INT NOT NULL,
-                descrizione VARCHAR(255), quantita DECIMAL(10,2) DEFAULT 1, prezzo DECIMAL(10,2) DEFAULT 0,
-                FOREIGN KEY (id_fattura) REFERENCES fatture(id_fattura) ON DELETE CASCADE)""")
-
-        cur.execute("SHOW TABLES LIKE 'magazzino_gomme'")
-        if not cur.fetchone():
-            cur.execute("""CREATE TABLE magazzino_gomme (
-                id_gomma INT AUTO_INCREMENT PRIMARY KEY, id_cliente INT,
-                marca VARCHAR(100) NOT NULL, modello VARCHAR(100),
-                stagione ENUM('Estiva','Invernale','All-Season','Altri') DEFAULT 'Estiva',
-                misura VARCHAR(50), quantita INT DEFAULT 1,
-                stato ENUM('Nuovo','Usato buono','Usato','Da smaltire') DEFAULT 'Nuovo',
-                posizione VARCHAR(100), deposito_pagato BOOLEAN DEFAULT FALSE,
-                montate BOOLEAN DEFAULT FALSE, note TEXT,
-                FOREIGN KEY (id_cliente) REFERENCES clienti(id_cliente) ON DELETE SET NULL)""")
-
-        # NOTA: la moltiplicazione IVA automatica è stata rimossa.
-        # Il totale viene preso direttamente da Excel (H44) senza calcoli aggiuntivi.
-
+        # INSERT OR IGNORE per il record di config
+        conn.execute("INSERT OR IGNORE INTO numero_fattura_config (id) VALUES (1)")
         conn.commit()
-        cur.close(); conn.close()
+        conn.close()
     except Exception:
-        pass  # Non bloccare l'avvio se la migrazione automatica fallisce
+        pass
 
-_auto_migra()  # Esegui subito all'avvio
+_auto_migra()
 
 def apri_file(path):
     if sys.platform == "win32":
@@ -421,17 +441,15 @@ def imposta_numero_fattura_manuale():
             return
         try:
             db_commit(
-                "INSERT INTO numero_fattura_config (id, prossimo_numero) "
-                "VALUES (1, %s) ON DUPLICATE KEY UPDATE prossimo_numero=%s",
-                (nuovo, nuovo))
+                "INSERT OR REPLACE INTO numero_fattura_config (id, prossimo_numero) VALUES (1, ?)",
+                (nuovo,))
         except Exception:
             db_commit(
                 "CREATE TABLE IF NOT EXISTS numero_fattura_config "
                 "(id INT PRIMARY KEY DEFAULT 1, prossimo_numero INT NULL)")
             db_commit(
-                "INSERT INTO numero_fattura_config (id, prossimo_numero) "
-                "VALUES (1, %s) ON DUPLICATE KEY UPDATE prossimo_numero=%s",
-                (nuovo, nuovo))
+                "INSERT OR REPLACE INTO numero_fattura_config (id, prossimo_numero) VALUES (1, ?)",
+                (nuovo,))
         messagebox.showinfo("✅ Impostato",
             f"La prossima fattura sarà: {nuovo}", parent=win)
         win.destroy()
@@ -2631,28 +2649,27 @@ def _trova_mysql_bin():
     return "mysqldump", "mysql"
 
 def sincronizza_onedrive_export(silenzioso=True):
-    """Esporta il DB su OneDrive. Chiamato alla chiusura del programma."""
-    if not ONEDRIVE_SQL_FILE:
+    """Copia officina.db su OneDrive per sincronizzazione."""
+    if not ONEDRIVE_SYNC_DIR:
         if not silenzioso:
             messagebox.showwarning("Sync", "OneDrive non trovato su questo PC.")
         return
     try:
-        mysqldump_exe, _ = _trova_mysql_bin()
-        result = subprocess.run(
-            [mysqldump_exe, "-u", "root", "-p1234", "officina"],
-            capture_output=True, text=True, timeout=30)
-        if result.returncode == 0:
-            ora = datetime.datetime.now().isoformat(timespec="seconds")
-            with open(ONEDRIVE_SQL_FILE, "w", encoding="utf-8") as f:
-                f.write(f"-- SYNC: {ora}\n")
-                f.write(result.stdout)
+        db_src = os.path.join(BASE_DIR, "officina.db")
+        if not os.path.exists(db_src):
             if not silenzioso:
-                messagebox.showinfo("✅ Sync OneDrive",
-                    f"Database sincronizzato su OneDrive!\n{ONEDRIVE_SQL_FILE}")
-        else:
-            if not silenzioso:
-                messagebox.showerror("Errore Sync",
-                    f"mysqldump ha restituito un errore:\n{result.stderr[:300]}")
+                messagebox.showwarning("Sync", "Database officina.db non trovato.")
+            return
+        os.makedirs(ONEDRIVE_SYNC_DIR, exist_ok=True)
+        db_dst = os.path.join(ONEDRIVE_SYNC_DIR, "officina_sync.db")
+        # Scrivi timestamp nel file di metadati
+        ora = datetime.datetime.now().isoformat(timespec="seconds")
+        with open(ONEDRIVE_SQL_FILE, "w", encoding="utf-8") as f:
+            f.write(f"-- SYNC: {ora}\n")
+        shutil.copy2(db_src, db_dst)
+        if not silenzioso:
+            messagebox.showinfo("✅ Sync OneDrive",
+                f"Database sincronizzato su OneDrive!\n{db_dst}")
     except Exception as e:
         if not silenzioso:
             messagebox.showerror("Errore Sync", str(e))
@@ -2660,15 +2677,17 @@ def sincronizza_onedrive_export(silenzioso=True):
 def sincronizza_onedrive_import():
     """
     All'avvio: se il file OneDrive è più recente del DB locale, chiede
-    se importare. Mostra sempre da quale PC arriva il backup.
+    se importare. Copia officina_sync.db → officina.db.
     """
-    if not ONEDRIVE_SQL_FILE or not os.path.exists(ONEDRIVE_SQL_FILE):
+    if not ONEDRIVE_SYNC_DIR:
+        return
+    db_remote = os.path.join(ONEDRIVE_SYNC_DIR, "officina_sync.db")
+    if not os.path.exists(ONEDRIVE_SQL_FILE) or not os.path.exists(db_remote):
         return
     try:
         ts_remote = _timestamp_sql(ONEDRIVE_SQL_FILE)
         if not ts_remote:
             return
-        # Controlla timestamp del DB locale
         ts_log_path = os.path.join(BASE_DIR, "ultimo_sync.txt")
         ts_local = None
         if os.path.exists(ts_log_path):
@@ -2677,19 +2696,14 @@ def sincronizza_onedrive_import():
                     ts_local = datetime.datetime.fromisoformat(f.read().strip())
             except Exception:
                 pass
-
         if ts_local and ts_remote <= ts_local:
-            return  # il DB locale è già aggiornato
+            return
 
-        # Il file OneDrive è più recente — chiedi conferma
         diff = ts_remote - (ts_local or datetime.datetime(2000,1,1))
         minuti = int(diff.total_seconds() / 60)
-        if minuti < 60:
-            diff_str = f"{minuti} minuti fa"
-        elif minuti < 1440:
-            diff_str = f"{minuti//60} ore fa"
-        else:
-            diff_str = f"{minuti//1440} giorni fa"
+        if minuti < 60:      diff_str = f"{minuti} minuti fa"
+        elif minuti < 1440:  diff_str = f"{minuti//60} ore fa"
+        else:                diff_str = f"{minuti//1440} giorni fa"
 
         risposta = messagebox.askyesno(
             "📥 Dati più recenti su OneDrive",
@@ -2698,27 +2712,22 @@ def sincronizza_onedrive_import():
             f"Vuoi importarlo? (sovrascriverà i dati locali)\n\n"
             f"Premi NO per continuare con i dati locali.")
         if risposta:
-            _, mysql_exe = _trova_mysql_bin()
-            sql_content = open(ONEDRIVE_SQL_FILE, encoding="utf-8").read()
-            result = subprocess.run(
-                [mysql_exe, "-u", "root", "-p1234", "officina"],
-                input=sql_content,
-                capture_output=True, text=True, timeout=60)
-            if result.returncode == 0:
-                with open(ts_log_path, "w") as f:
-                    f.write(ts_remote.isoformat())
-                messagebox.showinfo("✅ Importato",
-                    "Dati aggiornati da OneDrive!\nRicarico il gestionale...")
-                # Ricarica le liste
-                aggiorna_lista_clienti()
-                carica_fat_clienti()
-                carica_sto_clienti()
-                carica_gom_clienti(); carica_gomme()
-            else:
-                messagebox.showerror("Errore import",
-                    f"Errore durante l'importazione:\n{result.stderr[:300]}")
-    except Exception as e:
-        pass  # Non bloccare l'avvio
+            db_local = os.path.join(BASE_DIR, "officina.db")
+            # Backup del db locale prima di sovrascrivere
+            bak = db_local.replace(".db", "_pre_sync.db")
+            if os.path.exists(db_local):
+                shutil.copy2(db_local, bak)
+            shutil.copy2(db_remote, db_local)
+            with open(ts_log_path, "w") as f:
+                f.write(ts_remote.isoformat())
+            messagebox.showinfo("✅ Importato",
+                "Dati aggiornati da OneDrive!\nRicarico il gestionale...")
+            aggiorna_lista_clienti()
+            carica_fat_clienti()
+            carica_sto_clienti()
+            carica_gom_clienti(); carica_gomme()
+    except Exception:
+        pass
 
 def on_chiusura():
     """Esporta su OneDrive prima di chiudere."""
@@ -2889,12 +2898,10 @@ def _esegui_backup_su(chiavetta, silenzioso=True):
                     shutil.copy2(src, dst)
             except Exception:
                 pass
-        mysqldump_exe, _ = _trova_mysql_bin()
-        result = subprocess.run([mysqldump_exe, "-u", "root", "-p1234", "officina"],
-                                capture_output=True, text=True, timeout=60)
-        if result.returncode == 0:
-            with open(os.path.join(dest, "officina_dump.sql"), "w", encoding="utf-8") as f:
-                f.write(result.stdout)
+        # Backup SQLite — copia diretta del file .db
+        db_src = os.path.join(BASE_DIR, "officina.db")
+        if os.path.exists(db_src):
+            shutil.copy2(db_src, os.path.join(dest, "officina.db"))
         oggi = datetime.date.today().isoformat()
         with open(BACKUP_LOG, "w") as f: f.write(oggi)
         try:
