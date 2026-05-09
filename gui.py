@@ -17,8 +17,8 @@ TEMPLATE  = os.path.join(BASE_DIR, "RICEVUTA_TEMPLATE.xlsm")
 VERSIONE_CORRENTE = "1.0.0"
 
 # !! CAMBIA QUESTO con il tuo username GitHub e nome repository !!
-GITHUB_USER = "TUO_USERNAME_GITHUB"
-GITHUB_REPO = "garage-tito-gestionale"
+GITHUB_USER = "gab91205"
+GITHUB_REPO = "Gestionale-Officina"
 # URL del file version.txt nella release più recente
 GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/main/version.txt"
 GITHUB_GUI_URL     = f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/main/gui.py"
